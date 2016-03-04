@@ -52,6 +52,8 @@ type Message struct {
     Text string `json:"text"`
     Channel string `json:"channel"`
     Attachments []Attachment
+    IconUrl string `json:"icon_url"`
+    AsUser bool `json:"as_user"`
 }
 
 
@@ -143,6 +145,75 @@ func (client *SlackClient) PostMessage(message Message) (err error) {
 
     if res.StatusCode > 200 {
         err = errors.New(fmt.Sprint("Slack: не удалось отправить сообщение", string(body[:])))
+        return
+    }
+
+    return
+}
+
+// https://api.slack.com/methods/rtm.start
+type RTMStart struct {
+    Ok bool `json:"ok"`
+    Url string `json:"url"`
+    Channels []Channel `json:"channels"`
+    Groups []Channel `json:"groups"`
+}
+
+
+func (rtmStart *RTMStart) ChannelName(id string) string {
+    for _, channel := range rtmStart.Channels {
+        if channel.ID == id {
+            return channel.Name
+        }
+    }
+
+    for _, channel := range rtmStart.Groups {
+        if channel.ID == id {
+            return channel.Name
+        }
+    }
+
+    return ""
+}
+
+// https://api.slack.com/types/channel
+type Channel struct {
+    ID string `json:"id"`
+    Name string `json:"name"`
+}
+
+func (client *SlackClient) RTMStart() (rtmStart RTMStart, err error) {
+    url := client.getUrl()
+    url.Path = "api/rtm.start"
+
+    req, err := http.NewRequest("GET", url.String(), nil)
+
+    if err != nil {
+        return
+    }
+
+    response, err := client.httpClient.Do(req)
+
+    if err != nil {
+        return
+    }
+
+    defer response.Body.Close()
+
+    if response.StatusCode > 200 {
+        err = errors.New("Slack. не удалось получить url")
+        return
+    }
+
+    bodyBytes, err := ioutil.ReadAll(response.Body)
+
+    if err != nil {
+        return
+    }
+
+    err = json.Unmarshal(bodyBytes, &rtmStart)
+
+    if err != nil {
         return
     }
 

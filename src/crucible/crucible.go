@@ -127,7 +127,13 @@ func (client *Crucible) GetToken() (token string, err error) {
     return
 }
 
-func (client *Crucible) GetReviews(project string) (reviewList ReviewList, err error) {
+type GetReviewsOptions struct {
+    Project string
+    FromDate time.Time
+    States []string
+}
+
+func (client *Crucible) GetReviews(options GetReviewsOptions) (reviewList ReviewList, err error) {
     apiUrl := client.getUrl()
     apiUrl.Path = "/rest-service/reviews-v1/filter/details"
 
@@ -139,9 +145,20 @@ func (client *Crucible) GetReviews(project string) (reviewList ReviewList, err e
 
     query := apiUrl.Query()
     query.Set("FEAUTH", token)
-    query.Set("project", project)
-    yesterday := time.Now().AddDate(0, 0, -7).UnixNano() / int64(time.Millisecond);
-    query.Set("fromDate", strconv.FormatInt(yesterday, 10))
+
+    if options.Project != "" {
+        query.Set("project", options.Project)
+    }
+
+    if !options.FromDate.IsZero() {
+        fromDate := options.FromDate.UnixNano() / int64(time.Millisecond)
+        query.Set("fromDate", strconv.FormatInt(fromDate, 10))
+    }
+
+
+    if len(options.States) > 0 {
+        query.Set("states", strings.Join(options.States, ","))
+    }
 
     apiUrl.RawQuery = query.Encode()
 
@@ -214,7 +231,7 @@ type Review struct {
     Type string `json:"type"`
 }
 
-func (v1 Review) Compare(v2 Review) (equal bool, diffs []string) {
+func Compare(v1 Review, v2 Review) (equal bool, diffs []string) {
 
     if reflect.DeepEqual(v1, v2) {
         return equal, diffs
@@ -238,6 +255,14 @@ func (v1 Review) Compare(v2 Review) (equal bool, diffs []string) {
 
         if v1Completed < v2Completed {
             diffs = append(diffs, "reviewers.complited")
+        }
+
+        if len(v1.Reviewers.Reviewer) < len(v2.Reviewers.Reviewer) {
+            diffs = append(diffs, "reviewers.join")
+        }
+
+        if len(v1.Reviewers.Reviewer) > len(v2.Reviewers.Reviewer) {
+            diffs = append(diffs, "reviewers.leave")
         }
     }
 

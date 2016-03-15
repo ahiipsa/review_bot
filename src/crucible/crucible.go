@@ -23,25 +23,6 @@ type Config struct {
     Login string `json:"login"`
     Password string `json:"password"`
     Timeout time.Duration `json:"timeout"`
-    Projects []struct{
-        Name string `json:"name"`
-        SlackChannel string `json:"slackChannel"`
-    } `json:"projects"`
-}
-
-func (config *Config) GetChannelName(projectName string) (channel string, err error) {
-    for _, project := range config.Projects {
-        if project.Name == projectName {
-            channel = project.SlackChannel
-            return
-        }
-    }
-
-    if channel == "" {
-        err = errors.New("Not found")
-    }
-
-    return
 }
 
 type Crucible struct {

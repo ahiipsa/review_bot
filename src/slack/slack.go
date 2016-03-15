@@ -17,7 +17,7 @@ type Config struct  {
     Channel string
 }
 
-func (config *Config) GetChannelName() string {
+func (config *Config) ChannelName() string {
     return config.Channel
 }
 

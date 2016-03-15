@@ -12,16 +12,23 @@ import (
     "sync"
     "time"
     "golang.org/x/net/websocket"
+    "strconv"
 )
 
 // Документация https://docs.atlassian.com/fisheye-crucible/latest/wadl/crucible.html
 
-var globalConfig Config
+var CONFIG Config
 
 type Config struct {
     Crucible crucible.Config   `json:"crucible"`
     Slack    slack.Config      `json:"slack"`
-    UserMap  map[string]string `json:"usermap"`
+    UserMap  map[string]string `json:"userMap"`
+    ProjectMap map[string]string `json:"projectMap"`
+}
+
+func (config *Config) ChannelName(projectName string) (channel string, ok bool) {
+    channel, ok = config.ProjectMap[projectName];
+    return
 }
 
 func getConfig() (config Config, err error) {
@@ -43,7 +50,7 @@ func MapUserNicks(names []string) string {
     mentions := []string{}
 
     for _, value := range names {
-        nick := globalConfig.UserMap[value]
+        nick := CONFIG.UserMap[value]
         if nick == "" {
             nick = value
         }
@@ -65,16 +72,20 @@ func main() {
     log.Println("Старт бота")
     log.Println("Чтение конфига...")
     var err error
-    globalConfig, err = getConfig()
+    CONFIG, err = getConfig()
 
     if err != nil {
         log.Fatalln("Ошибка чтения конфига", err)
         return
     }
 
+    if len(CONFIG.ProjectMap) == 0 {
+        log.Fatalln("Надо указать хотябы один проект")
+    }
+
     log.Println("Конфиг получен")
 
-    slackClient, err := slack.CreateClient(globalConfig.Slack)
+    slackClient, err := slack.CreateClient(CONFIG.Slack)
 
     if err != nil {
         log.Fatalln("Ошибка создания Slack клиента", err)
@@ -87,24 +98,32 @@ func main() {
         log.Fatalln("Не удалось авторизаваться с Slack", err)
     }
 
-    crucibleClient, err := crucible.CreateClient(globalConfig.Crucible)
+    crucibleClient, err := crucible.CreateClient(CONFIG.Crucible)
 
     if err != nil {
         log.Fatalln("Не удалось создать Crucible клиент", err)
     }
 
+    _, err = crucibleClient.GetToken()
+
+    if err != nil {
+        log.Fatalln("Не удалось авторизоваться в Crucible", err)
+    }
+
     var wg sync.WaitGroup
 
     wg.Add(1)
-    watchCommand(&slackClient, &crucibleClient, &wg)
+    go watchCommand(&slackClient, &crucibleClient, &wg)
+
 
     // Рассылка сообщений в Slack
     go listenReviewUpdate(reviewEvents, slackClient)
 
-    for _, project := range globalConfig.Crucible.Projects {
-        log.Println("Подключаем проект", project.Name)
+
+    for projectName, _ := range CONFIG.ProjectMap {
+        log.Println("Подключаем проект", projectName)
         wg.Add(1)
-        go watchProject(project.Name, &crucibleClient, reviewEvents, &wg)
+        go watchProject(projectName, &crucibleClient, reviewEvents, &wg)
     }
 
     wg.Wait()
@@ -114,12 +133,13 @@ func main() {
     Слежение за списком ревью, при обновлении ревью посылает событие в канал `eventChannel chan ReviewEvent`
  */
 func watchProject(projectName string, crucibleClient *crucible.Crucible, eventChannel chan ReviewEvent, wg *sync.WaitGroup) {
-    defer wg.Done()
-    timeout := globalConfig.Crucible.Timeout
+    timeout := CONFIG.Crucible.Timeout
     reviews, err := crucibleClient.GetReviews(crucible.GetReviewsOptions{
         Project: projectName,
         FromDate: time.Now().AddDate(0, 0, -7), // weekago
     })
+
+
 
     if err != nil {
         log.Fatalln("Ошибка получения списка review", err)
@@ -162,6 +182,8 @@ func watchProject(projectName string, crucibleClient *crucible.Crucible, eventCh
         reviews = update
         count++
     }
+
+    wg.Done()
 }
 
 func listenReviewUpdate(reviewEvents chan ReviewEvent, slackClient slack.SlackClient){
@@ -199,7 +221,7 @@ template %s`,
             event.NewRev.GetID(),
             event.NewRev.Name,
             author,
-            event.NewRev.GetURL(globalConfig.Crucible.Host),
+            event.NewRev.GetURL(CONFIG.Crucible.Host),
             event.OldRev.GetState(), event.NewRev.GetState(),
             fmt.Sprintf(mTemplate, author, reviewers),
         )
@@ -208,15 +230,15 @@ template %s`,
             continue
         }
 
-        channelName, err := globalConfig.Crucible.GetChannelName(event.ProjectName)
+        channelName, ok := CONFIG.ChannelName(event.ProjectName)
 
-        if err != nil {
+        if ok == false {
             log.Println("Не указан канал для проекта", event.ProjectName)
-            channelName = globalConfig.Slack.GetChannelName()
+            channelName = CONFIG.Slack.ChannelName()
         }
 
         if channelName == "" {
-            log.Println("Не канал по умолчанию", event.ProjectName)
+            log.Println("Не указан служебный канал", event.ProjectName)
         }
 
         slackMessage := slack.Message{
@@ -234,10 +256,10 @@ template %s`,
         slackMessage.AddAttachment(slack.Attachment{
             AuthorName: author,
             Title:      title,
-            TitleLink:  event.NewRev.GetURL(globalConfig.Crucible.Host),
+            TitleLink:  event.NewRev.GetURL(CONFIG.Crucible.Host),
         })
 
-        err = slackClient.PostMessage(slackMessage)
+        err := slackClient.PostMessage(slackMessage)
 
         if err != nil {
             log.Println("Ошибка отправки сообщения", err)
@@ -246,105 +268,149 @@ template %s`,
 }
 
 type SlackMessage struct {
-    Type    string `json:"type"`
-    Subtype string `json:"subtype"`
-    Channel string `json:"channel"`
-    User    string `json:"user"`
-    Text    string `json:"text"`
-    Time    string `json:"ts"`
+    Type        string `json:"type"`
+    Subtype     string `json:"subtype"`
+    ChannelID   string `json:"channel"`
+    ChannelName string
+    User        string `json:"user"`
+    Text        string `json:"text"`
+    Ts          string `json:"ts"`
+    Time        time.Time
+}
+
+
+func (m *SlackMessage) GetTime() time.Time {
+    timestamp := time.Time{}
+
+    if len(m.Ts) == 0 {
+        return timestamp
+    }
+
+    str := strings.Split(m.Ts, ".")
+
+    intTime, err := strconv.ParseInt(str[0], 10, 64)
+
+    if err == nil {
+        timestamp = time.Unix(intTime, 0)
+    }
+
+    return timestamp
 }
 
 /**
     Обрабатывае сообщения из слака и преобразует в команды
  */
 func watchCommand(slackClient *slack.SlackClient, crucibleClient *crucible.Crucible, wg *sync.WaitGroup) {
-    defer wg.Done()
+    var ws *websocket.Conn
+    var rtmStart slack.RTMStart
+    var err error
 
-    go func() {
-        rtmStart, err := slackClient.RTMStart()
+    for {
 
-        if err != nil {
-            log.Fatalln("Ошибка получения настроек для RTM", err)
-            return
-        }
+        if ws == nil || ws.IsClientConn() == false {
+            rtmStart, err = slackClient.RTMStart()
 
-        ws, err := websocket.Dial(rtmStart.Url, "", "http://localhost/")
-
-        if err != nil {
-            log.Fatalln("Ошибка websocket соединения", err)
-            return
-        }
-
-
-        for {
-            var messageRaw []byte
-            var message SlackMessage
-            err = websocket.Message.Receive(ws, &messageRaw)
             if err != nil {
-                log.Println("Ошибка получения сообщения из Slack", err)
-                continue
+                log.Fatalln("Ошибка получения настроек для RTM", err)
+                return
             }
 
-            err = json.Unmarshal(messageRaw, &message)
+            ws, err = websocket.Dial(rtmStart.Url, "", "http://localhost/")
+
             if err != nil {
-                log.Println("Ошибка парсинга в JSON", err)
+                log.Println("Ошибка websocket соединения", err)
                 continue
+            } else {
+                log.Println("Готов принимать команды через Slack")
             }
-
-            log.Println("Сообщение", string(messageRaw[:]))
-
-            if strings.Contains(message.Text, "reviews 1234") {
-                log.Println("Выполняем команду...")
-                slackClient.PostMessage(slack.Message{
-                    Channel: message.Channel,
-                    Text: "Минутку...",
-                });
-
-                continue
-                reviews, err := crucibleClient.GetReviews(crucible.GetReviewsOptions{
-                    States: []string{"Review"},
-                });
-
-                if err != nil {
-                    log.Println("ошибка получения ревью:", err)
-                    continue
-                }
-
-                list := slack.Message{
-                    Text: "Список незакрытых ревью",
-                    Channel: message.Channel,
-                    IconUrl: "http://lorempixel.com/48/48/cats/",
-                    AsUser: false,
-                }
-
-                // Сформировать сообщение со списком открытых ревью
-                for _, rev := range reviews.Reviews {
-                    attachment := slack.Attachment{
-                        TitleLink: rev.GetURL(globalConfig.Crucible.Host),
-                        AuthorName: MapUserNicks([]string{rev.GetAuthorNick()}),
-                    }
-
-                    attachment.Title = rev.Name;
-                    if attachment.Title == "" {
-                        attachment.Title = rev.GetID()
-                    }
-
-                    attachment.Color = "good"
-
-                    if !rev.IsCompleted() {
-                        attachment.Color = "danger" // red
-                    }
-
-                    list.AddAttachment(attachment)
-                    channelName, err := globalConfig.Crucible.GetChannelName(rev.ProjectKey)
-                    log.Println("channel", channelName, err)
-                }
-
-                slackClient.PostMessage(list);
-                log.Println("Отправили список...")
-
-            }
-
         }
-    }()
+
+        var messageRaw []byte
+        var message SlackMessage
+        err := websocket.Message.Receive(ws, &messageRaw)
+        if err != nil {
+            log.Println("Ошибка получения сообщения из Slack", err)
+            continue
+        }
+
+        err = json.Unmarshal(messageRaw, &message)
+        if err != nil {
+            log.Println("Ошибка парсинга в JSON", err)
+            continue
+        }
+
+
+        message.Time = message.GetTime()
+        message.ChannelName = rtmStart.ChannelName(message.ChannelID)
+
+        //log.Println("Сообщение", string(messageRaw[:]))
+
+        if strings.Contains(message.Text, "review list") {
+            since := time.Since(message.Time)
+            if since.Seconds() > 10 {
+                continue
+            }
+
+            log.Println("Выполняем команду...", "Message since", since.Seconds())
+            slackClient.PostMessage(slack.Message{
+                Channel: message.ChannelID,
+                Text: "Минутку...",
+            });
+
+            reviews, err := crucibleClient.GetReviews(crucible.GetReviewsOptions{
+                States: []string{"Review"},
+            });
+
+            if err != nil {
+                log.Println("Ошибка получения ревью:", err)
+                continue
+            }
+
+            messageList := slack.Message{
+                Text: "Список незакрытых ревью",
+                Channel: message.ChannelID,
+                IconUrl: "http://lorempixel.com/48/48/cats/",
+                AsUser: false,
+            }
+
+            // Сформировать сообщение со списком открытых ревью
+            for _, rev := range reviews.Reviews {
+                attachment := slack.Attachment{
+                    TitleLink: rev.GetURL(CONFIG.Crucible.Host),
+                    AuthorName: MapUserNicks([]string{rev.GetAuthorNick()}),
+                }
+
+                attachment.Title = rev.Name;
+                if attachment.Title == "" {
+                    attachment.Title = rev.GetID()
+                }
+
+                attachment.Color = "good"
+
+                if !rev.IsCompleted() {
+                    attachment.Color = "danger" // red
+                }
+
+                projectChannelName, ok := CONFIG.ChannelName(rev.ProjectKey)
+
+                if ok == false {
+                    log.Println("Не найден канал для проекта", rev.ProjectKey);
+                }
+
+                if projectChannelName == message.ChannelName ||
+                    CONFIG.Slack.ChannelName() == message.ChannelName {
+                    messageList.AddAttachment(attachment)
+                }
+            }
+
+            if len(messageList.Attachments) == 0 {
+                messageList.Text = "Все ревью закрыты"
+            }
+
+            slackClient.PostMessage(messageList)
+            log.Println("Отправили список...")
+        }
+
+    }
+    wg.Done()
 }

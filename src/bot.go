@@ -158,12 +158,20 @@ func watchProject(projectName string, crucibleClient *crucible.Crucible, eventCh
         })
 
         if err != nil {
-            log.Println("Ошибка обновления списка review", projectName, err)
-            updateError = true
+            if updateError == false {
+                log.Println("Ошибка обновления списка review", projectName, err)
+                updateError = true
+            }
             continue
         } else if updateError {
             log.Println("Успешно обновлён список review после ошибки", projectName)
             updateError = false
+        }
+
+        if len(update.Reviews) == 0 {
+            // Пустой список ревью
+            log.Println("Пришел пустой список ревью", projectName)
+            continue
         }
 
         for _, renewed := range update.Reviews {

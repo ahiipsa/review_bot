@@ -1,0 +1,19 @@
+{
+  "crucible": {
+    "host": "https://crucible.MYHOST.ru",
+    "login": "username",
+    "password": "userpass",
+    "timeout": 5
+  },
+  "slack": {
+    "host": "https://slack.com/",
+    "token": "sometoken",
+    "channel": "default_slack_channel"
+  },
+  "userMap": {
+    "crucible_name": "slack_name"
+  },
+  "projectMap": {
+    "CRUCIBLE_PROJECT_NAME": "slack_channel",
+  }
+}
